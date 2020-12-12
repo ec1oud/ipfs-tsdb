@@ -19,13 +19,11 @@ use clap::{App, Arg};
 use futures::TryStreamExt;
 use ipfs_api::IpfsClient;
 use serde_json;
-use std::any::type_name;
 use std::io;
-use std::io::Cursor;
 use tokio;
 
 #[tokio::main]
-async fn insert_from_json<R: io::Read>(rdr: R) {
+async fn insert_from_json<R: io::Read>(rdr: R) -> String {
     let json_data: serde_json::Value = serde_json::from_reader(rdr).unwrap();
     println!("deserialized input = {:?}", json_data);
 
@@ -57,6 +55,36 @@ async fn insert_from_json<R: io::Read>(rdr: R) {
             eprintln!("error reading dag node: {}", e);
         }
     }
+
+    return cid;
+}
+
+#[tokio::main]
+async fn create_from_cid(cid: &str) -> String {
+    let client = IpfsClient::default();
+    let publish = match client
+        .name_publish(&cid, false, Some("12h"), None, None)
+        .await
+    {
+        Ok(publish) => {
+            eprintln!(
+                "new database created; published initial data {} to: /ipns/{}",
+                &cid, &publish.name
+            );
+            publish
+        }
+        Err(e) => {
+            eprintln!("error publishing name: {}", e);
+            return cid.to_string();
+        }
+    };
+    let name: String = publish.name;
+    return name;
+}
+
+fn create_from_json<R: io::Read>(rdr: R) -> String {
+    let cid = insert_from_json(rdr);
+    return create_from_cid(&cid);
 }
 
 fn main() {
@@ -99,8 +127,10 @@ fn main() {
 
     let _verbosity = matches.occurrences_of("v");
 
-    match matches.value_of("query").unwrap() {
+    let result = match matches.value_of("query").unwrap() {
         "insert" => insert_from_json(io::stdin()),
-        _ => println!("only insert is supported for now"),
-    }
+        "create" => create_from_json(io::stdin()),
+        _ => "create or insert please".to_string(),
+    };
+    println!("{}", result);
 }
