@@ -23,7 +23,7 @@ use std::io;
 use tokio;
 
 #[tokio::main]
-async fn insert_from_json<R: io::Read>(rdr: R) -> String {
+async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
     let json_data: serde_json::Value = serde_json::from_reader(rdr).unwrap();
     println!("deserialized input = {:?}", json_data);
 
@@ -56,35 +56,19 @@ async fn insert_from_json<R: io::Read>(rdr: R) -> String {
         }
     }
 
-    return cid;
-}
-
-#[tokio::main]
-async fn create_from_cid(cid: &str) -> String {
-    let client = IpfsClient::default();
-    let publish = match client
-        .name_publish(&cid, false, Some("12h"), None, None)
+    match client
+        .name_publish(&cid, false, Some("12h"), None, Some(ipnskey))
         .await
     {
         Ok(publish) => {
-            eprintln!(
-                "new database created; published initial data {} to: /ipns/{}",
-                &cid, &publish.name
-            );
-            publish
+            eprintln!("published data {} to: /ipns/{}", &cid, &publish.name);
+            return publish.name;
         }
         Err(e) => {
             eprintln!("error publishing name: {}", e);
             return cid.to_string();
         }
     };
-    let name: String = publish.name;
-    return name;
-}
-
-fn create_from_json<R: io::Read>(rdr: R) -> String {
-    let cid = insert_from_json(rdr);
-    return create_from_cid(&cid);
 }
 
 fn main() {
@@ -102,13 +86,19 @@ fn main() {
         .arg(
             Arg::with_name("file")
                 .help("Sets the file to use (default is stdin/stdout)")
-                .index(2),
+                .index(3),
+        )
+        .arg(
+            Arg::with_name("ipnskey")
+                .help("IPNS key created with 'ipfs key gen' command")
+                .required(true)
+                .index(1),
         )
         .arg(
             Arg::with_name("query")
                 .help("insert or select")
                 .required(true)
-                .index(1),
+                .index(2),
         )
         .arg(
             Arg::with_name("v")
@@ -127,10 +117,11 @@ fn main() {
 
     let _verbosity = matches.occurrences_of("v");
 
+    let key = matches.value_of("ipnskey").unwrap();
+
     let result = match matches.value_of("query").unwrap() {
-        "insert" => insert_from_json(io::stdin()),
-        "create" => create_from_json(io::stdin()),
-        _ => "create or insert please".to_string(),
+        "insert" => insert_from_json(key, io::stdin()),
+        _ => "only insert is supported so far".to_string(),
     };
     println!("{}", result);
 }
