@@ -30,6 +30,7 @@ static mut VERBOSITY: u64 = 0;
 
 #[tokio::main]
 async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
+	let begintime = SystemTime::now();
 	let verbosity = unsafe { VERBOSITY };
 	let unixtime = serde_json::json!(
 		match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
@@ -55,6 +56,13 @@ async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
 				.id[..];
 			match client.name_resolve(Some(ipns_name), true, false).await {
 				Ok(resolved) => {
+					if verbosity > 1 {
+						println!(
+							"resolved {} after {} ms",
+							ipns_name,
+							begintime.elapsed().unwrap().as_millis()
+						);
+					}
 					match client
 						.dag_get(&resolved.path)
 						.map_ok(|chunk| chunk.to_vec())
@@ -62,13 +70,20 @@ async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
 						.await
 					{
 						Ok(bytes) => {
+							if verbosity > 1 {
+								println!(
+									"dag_get {} done @ {} ms",
+									&resolved.path,
+									begintime.elapsed().unwrap().as_millis()
+								);
+							}
 							let mut existing: JsonMap = serde_json::from_slice(&bytes).unwrap();
 							for (key, value) in existing.iter_mut() {
 								let new_value: &serde_json::Value = match key.as_str() {
 									"_timestamp" => &unixtime,
 									_ => json_data.get(key).unwrap(),
 								};
-								if verbosity > 1 {
+								if verbosity > 2 {
 									println!("{:?} {:?} <- {:?}", key, value, new_value);
 								}
 								let vec = value.as_array_mut().unwrap();
@@ -77,22 +92,51 @@ async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
 							let cursor = io::Cursor::new(serde_json::json!(existing).to_string());
 							let response = client.dag_put(cursor).await.expect("dag_put error");
 							let cid = response.cid.cid_string;
-							if verbosity > 0 {
+							if verbosity > 1 {
 								println!(
-									"ipns {} {} {} -> {}",
-									ipnskey, ipns_name, &resolved.path, cid
+									"ipns {} {} {} -> {} @ {} ms",
+									ipnskey,
+									ipns_name,
+									&resolved.path,
+									cid,
+									begintime.elapsed().unwrap().as_millis()
 								);
 							}
 							client.pin_add(&cid, false).await.expect("pin error");
+							if verbosity > 1 {
+								println!(
+									"pinned @ {} ms",
+									begintime.elapsed().unwrap().as_millis()
+								);
+							}
 							let _ = client.pin_rm(&resolved.path, false).await;
+							if verbosity > 1 {
+								println!(
+									"unpinned old @ {} ms",
+									begintime.elapsed().unwrap().as_millis()
+								);
+							}
 							client
 								.block_rm(&resolved.path)
 								.await
 								.expect("error removing last");
+							if verbosity > 1 {
+								println!(
+									"block_rm(old) done @ {} ms",
+									begintime.elapsed().unwrap().as_millis()
+								);
+							}
 							client
 								.name_publish(&cid, false, Some("12h"), None, Some(ipnskey))
 								.await
 								.expect("error publishing name");
+							if verbosity > 1 {
+								println!(
+									"published {} @ {} ms",
+									&cid,
+									begintime.elapsed().unwrap().as_millis()
+								);
+							}
 							return cid;
 						}
 						Err(e) => {
