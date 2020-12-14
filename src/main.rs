@@ -26,8 +26,11 @@ use tokio;
 
 type JsonMap = HashMap<String, serde_json::Value>;
 
+static mut VERBOSITY: u64 = 0;
+
 #[tokio::main]
 async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
+	let verbosity = unsafe { VERBOSITY };
 	let unixtime = serde_json::json!(
 		match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
 			Ok(n) => n.as_secs(),
@@ -36,7 +39,9 @@ async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
 	);
 
 	let json_data: JsonMap = serde_json::from_reader(rdr).unwrap();
-	println!("deserialized input = {:?}", json_data);
+	if verbosity > 1 {
+		println!("given {:?}", json_data);
+	}
 
 	let client = IpfsClient::default();
 
@@ -48,10 +53,8 @@ async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
 				.find(|&keypair| keypair.name == ipnskey)
 				.unwrap()
 				.id[..];
-			eprintln!("found ipns_name {:?}", ipns_name);
 			match client.name_resolve(Some(ipns_name), true, false).await {
 				Ok(resolved) => {
-					eprintln!("{} existing record: {}", ipnskey, &resolved.path);
 					match client
 						.dag_get(&resolved.path)
 						.map_ok(|chunk| chunk.to_vec())
@@ -59,48 +62,38 @@ async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
 						.await
 					{
 						Ok(bytes) => {
-							println!("{}", String::from_utf8_lossy(&bytes[..]));
 							let mut existing: JsonMap = serde_json::from_slice(&bytes).unwrap();
-							println!("existing dag node {:?}", existing);
 							for (key, value) in existing.iter_mut() {
 								let new_value: &serde_json::Value = match key.as_str() {
 									"_timestamp" => &unixtime,
 									_ => json_data.get(key).unwrap(),
 								};
-								println!("{:?} {:?} <- {:?}", key, value, new_value);
+								if verbosity > 1 {
+									println!("{:?} {:?} <- {:?}", key, value, new_value);
+								}
 								let vec = value.as_array_mut().unwrap();
 								vec.push(new_value.clone());
 							}
-							println!("updated dag node {:?}", existing);
 							let cursor = io::Cursor::new(serde_json::json!(existing).to_string());
 							let response = client.dag_put(cursor).await.expect("dag_put error");
 							let cid = response.cid.cid_string;
+							if verbosity > 0 {
+								println!(
+									"ipns {} {} {} -> {}",
+									ipnskey, ipns_name, &resolved.path, cid
+								);
+							}
 							client.pin_add(&cid, false).await.expect("pin error");
-							client
-								.pin_rm(&resolved.path, false)
-								.await
-								.expect("unpin error");
+							let _ = client.pin_rm(&resolved.path, false).await;
 							client
 								.block_rm(&resolved.path)
 								.await
 								.expect("error removing last");
-							eprintln!("added {} removed {}", cid, &resolved.path);
-							match client
+							client
 								.name_publish(&cid, false, Some("12h"), None, Some(ipnskey))
 								.await
-							{
-								Ok(publish) => {
-									eprintln!(
-										"published data {} to: /ipns/{}",
-										&cid, &publish.name
-									);
-									return publish.name;
-								}
-								Err(e) => {
-									eprintln!("error publishing name: {}", e);
-									return cid.to_string();
-								}
-							};
+								.expect("error publishing name");
+							return cid;
 						}
 						Err(e) => {
 							eprintln!("error reading dag node: {}", e);
@@ -158,20 +151,22 @@ fn main() {
 		)
 		.get_matches();
 
-	let fmt = matches.value_of("format").unwrap_or("json");
-	println!("Value for fmt: {}", fmt);
+	//~ let fmt = matches.value_of("format").unwrap_or("json");
+	//~ println!("Value for fmt: {}", fmt);
 
 	if let Some(matches) = matches.value_of("file") {
 		println!("Using file: {}", matches);
 	}
 
-	let _verbosity = matches.occurrences_of("v");
+	unsafe {
+		VERBOSITY = matches.occurrences_of("v");
+	}
 
 	let key = matches.value_of("ipnskey").unwrap();
 
-	let result = match matches.value_of("query").unwrap() {
+	let _result = match matches.value_of("query").unwrap() {
 		"insert" => insert_from_json(key, io::stdin()),
 		_ => "only insert is supported so far".to_string(),
 	};
-	println!("{}", result);
+	//~ println!("{}", result);
 }
