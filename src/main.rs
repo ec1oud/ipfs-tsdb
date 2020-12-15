@@ -21,12 +21,14 @@ use ipfs_api::IpfsClient;
 use serde_json;
 use std::collections::HashMap;
 use std::io;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tokio;
+use tokio::time::timeout;
 
 type JsonMap = HashMap<String, serde_json::Value>;
 
 static mut VERBOSITY: u64 = 0;
+static PUBLISH_TIMEOUT: u64 = 50;
 
 #[tokio::main]
 async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
@@ -126,16 +128,24 @@ async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
 									begintime.elapsed().unwrap().as_millis()
 								);
 							}
-							client
-								.name_publish(&cid, false, Some("12h"), None, Some(ipnskey))
-								.await
-								.expect("error publishing name");
-							if verbosity > 1 {
-								println!(
-									"published {} @ {} ms",
+							let fut =
+								client.name_publish(&cid, false, Some("12h"), None, Some(ipnskey));
+							match timeout(Duration::from_secs(PUBLISH_TIMEOUT), fut).await {
+								Ok(_res) => {
+									if verbosity > 1 {
+										println!(
+											"published {} @ {} ms",
+											&cid,
+											begintime.elapsed().unwrap().as_millis()
+										);
+									}
+								}
+								Err(e) => println!(
+									"error or timeout while publishing {} @ {} ms: {:?}",
 									&cid,
-									begintime.elapsed().unwrap().as_millis()
-								);
+									begintime.elapsed().unwrap().as_millis(),
+									e
+								),
 							}
 							return cid;
 						}
