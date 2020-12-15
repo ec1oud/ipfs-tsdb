@@ -1,0 +1,38 @@
+{
+  "_timestamp": {
+    "type": "u64"
+  },
+  "ch2o": {
+    "type": "f32"
+  },
+  "co2":  {
+    "type": "u16"
+  },
+  "cpm":{
+    "type": "u16"
+  },
+  "humidity": {
+    "type": "f32"
+  },
+  "noise":{
+    "type": "f32"
+  },
+  "pm25":{
+    "type": "u16"
+  },
+  "pressure": {
+    "type": "u32"
+  },
+  "temperature": {
+    "type": "f32"
+  },
+  "uptime": {
+    "type": "u32"
+  },
+  "voc": {
+    "type": "u32"
+  },
+  "voltage": {
+    "type": "u16"
+  }
+}
