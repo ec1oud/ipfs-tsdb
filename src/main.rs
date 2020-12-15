@@ -111,23 +111,6 @@ async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
 									begintime.elapsed().unwrap().as_millis()
 								);
 							}
-							let _ = client.pin_rm(&resolved.path, false).await;
-							if verbosity > 1 {
-								println!(
-									"unpinned old @ {} ms",
-									begintime.elapsed().unwrap().as_millis()
-								);
-							}
-							client
-								.block_rm(&resolved.path)
-								.await
-								.expect("error removing last");
-							if verbosity > 1 {
-								println!(
-									"block_rm(old) done @ {} ms",
-									begintime.elapsed().unwrap().as_millis()
-								);
-							}
 							let fut =
 								client.name_publish(&cid, false, Some("12h"), None, Some(ipnskey));
 							match timeout(Duration::from_secs(PUBLISH_TIMEOUT), fut).await {
@@ -136,6 +119,23 @@ async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
 										println!(
 											"published {} @ {} ms",
 											&cid,
+											begintime.elapsed().unwrap().as_millis()
+										);
+									}
+									let _ = client.pin_rm(&resolved.path, false).await;
+									if verbosity > 1 {
+										println!(
+											"unpinned old @ {} ms",
+											begintime.elapsed().unwrap().as_millis()
+										);
+									}
+									client
+										.block_rm(&resolved.path)
+										.await
+										.expect("error removing last");
+									if verbosity > 1 {
+										println!(
+											"block_rm(old) done @ {} ms",
 											begintime.elapsed().unwrap().as_millis()
 										);
 									}
