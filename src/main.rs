@@ -17,6 +17,7 @@
 
 #[macro_use]
 extern crate prettytable;
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use chrono::prelude::*;
 use clap::{App, Arg, SubCommand};
 use env_logger;
@@ -24,14 +25,23 @@ use futures::TryStreamExt;
 use ipfs_api::IpfsClient;
 use log::{debug, info, trace};
 use prettytable::{format, Row, Table};
+use serde::{Deserialize, Serialize};
+use serde_cbor;
 use serde_json;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::io;
 use std::time::{Duration, SystemTime};
 use tokio;
 use tokio::time::timeout;
 
-type JsonMap = HashMap<String, serde_json::Value>;
+type JsonMap = BTreeMap<String, serde_json::Value>;
+type CborMap = BTreeMap<String, serde_cbor::Value>;
+
+#[derive(Serialize, Deserialize, Debug)]
+struct RootNode {
+	schema: String,
+	column_heads: BTreeMap<String, String>,
+}
 
 const PUBLISH_TIMEOUT: u64 = 50;
 const TIMESTAMP_KEY: &str = "_timestamp";
@@ -49,7 +59,7 @@ async fn resolve_root(
 		.id[..];
 	match client.name_resolve(Some(ipns_name), true, false).await {
 		Ok(resolved) => {
-			debug!("resolved {}", ipns_name);
+			debug!("resolved {}: {}", ipns_name, resolved.path.to_string());
 			Ok(resolved.path.to_string())
 		}
 		Err(e) => Err(e),
@@ -74,6 +84,16 @@ async fn get_node_json(
 	}
 }
 
+async fn publish_root(client: &IpfsClient, ipnskey: &str, cid: &str) {
+	let fut = client.name_publish(&cid, false, Some("12h"), None, Some(ipnskey));
+	match timeout(Duration::from_secs(PUBLISH_TIMEOUT), fut).await {
+		Ok(_res) => {
+			info!("published {}", &cid);
+		}
+		Err(e) => eprintln!("error or timeout while publishing {}: {:?}", &cid, e),
+	}
+}
+
 #[tokio::main]
 async fn select_json(ipnskey: &str, limit: i32, query: Vec<&str>) {
 	debug!(
@@ -83,86 +103,134 @@ async fn select_json(ipnskey: &str, limit: i32, query: Vec<&str>) {
 
 	let client = IpfsClient::default();
 	let resolved_path = resolve_root(&client, &ipnskey).await.unwrap();
-	match get_node_json(&client, &resolved_path).await {
-		Ok(all_records) => {
-			// TODO if "select *" (empty query?) replace it with
-			// for (key, value) in all_records.iter_mut() { ...
-			let mut row_count: usize = 0; // = all_records.values() .len();
-			let mut record_values = Vec::new(); //: Vec<serde_json::Value>;
-			let mut title_row = Row::empty();
-			for field_key in &query {
-				if field_key == &TIMESTAMP_KEY {
-					title_row.add_cell(cell!("timestamp (UTC)"));
-				} else {
-					title_row.add_cell(cell!(field_key));
-				}
-				let values = all_records
-					.get(*field_key)
-					.unwrap()
-					.as_array()
-					.unwrap()
-					.to_vec();
-				if row_count == 0 {
-					row_count = values.len();
-				}
-				assert_eq!(row_count, values.len()); // values were missing during some inserts?
-				if limit > -1 {
-					record_values.push(values[(row_count - (limit as usize))..row_count].to_vec());
-				} else {
-					record_values.push(values);
-				}
-				//~ println!("{}: {:?} records", field_key, row_count);
-				//~ println!("{}: {:?}", field_key, record_values[record_values.len()]);
-			}
-			let mut table = Table::new();
-			let format = format::FormatBuilder::new()
-				.column_separator('|')
-				.borders('|')
-				.separators(
-					&[format::LinePosition::Title],
-					format::LineSeparator::new('-', '|', '|', '|'),
-				)
-				.padding(1, 1)
-				.build();
-			table.set_format(format);
-			table.set_titles(title_row);
-			if limit > -1 {
-				row_count = limit as usize;
-			}
-			for r in 0..row_count {
-				let mut row = Row::empty();
-				for c in 0..record_values.len() {
-					if query[c] == TIMESTAMP_KEY {
-						let ts = record_values[c][r].as_i64().unwrap();
-						let dt: chrono::DateTime<Utc> =
-							DateTime::from_utc(NaiveDateTime::from_timestamp(ts, 0), Utc);
-						row.add_cell(cell!(dt.format("%Y-%m-%d %H:%M")));
-					} else {
-						row.add_cell(cell!(record_values[c][r].to_string()));
-					}
-				}
-				table.add_row(row);
-			}
-			table.printstd();
+	let root_bytes = client
+		.dag_get(&resolved_path)
+		.map_ok(|chunk| chunk.to_vec())
+		.try_concat()
+		.await
+		.unwrap();
+	let root: RootNode = serde_json::from_slice(&root_bytes).unwrap();
+	trace!("{:#?}", root);
+	let mut field_readers = vec![];
+	let mut title_row = Row::empty();
+	for field_name in &query {
+		let col_head_cid = root.column_heads.get(&field_name.to_string()).unwrap();
+		let col_bytes = client
+			.block_get(&col_head_cid)
+			.map_ok(|chunk| chunk.to_vec())
+			.try_concat()
+			.await
+			.unwrap();
+		let col: CborMap = serde_cbor::from_slice(&col_bytes).unwrap();
+		if let serde_cbor::Value::Bytes(data_bytes) = col.get("data").unwrap().to_owned() {
+			debug!(
+				"{}: '{}' has {} bytes",
+				field_name,
+				col_head_cid,
+				data_bytes.len()
+			);
+			field_readers.push(io::Cursor::new(data_bytes));
 		}
-		Err(e) => {
-			eprintln!("error reading dag node: {}", e);
+		if field_name == &TIMESTAMP_KEY {
+			title_row.add_cell(cell!("timestamp (UTC)"));
+		} else {
+			title_row.add_cell(cell!(field_name));
 		}
 	}
+
+	// TODO if "select *" (empty query?) get all fields
+	let mut table = Table::new();
+	let format = format::FormatBuilder::new()
+		.column_separator('|')
+		.borders('|')
+		.separators(
+			&[format::LinePosition::Title],
+			format::LineSeparator::new('-', '|', '|', '|'),
+		)
+		.padding(1, 1)
+		.build();
+	table.set_format(format);
+	table.set_titles(title_row);
+	let mut cur_row: i32 = 0;
+
+	// emit rows until the data runs out or we hit the limit
+	loop {
+		let mut row = Row::empty();
+		let mut eof = false;
+		for c in 0..field_readers.len() {
+			let rdr = &mut field_readers[c];
+			match query[c] {
+				TIMESTAMP_KEY => {
+					// actually it was written as u64, but we won't need that MSB for millennia
+					let ts = rdr.read_i64::<LittleEndian>();
+					// TODO do error checking more elegantly
+					if ts.is_ok() {
+						let dt: chrono::DateTime<Utc> =
+							DateTime::from_utc(NaiveDateTime::from_timestamp(ts.unwrap(), 0), Utc);
+						row.add_cell(cell!(dt.format("%Y-%m-%d %H:%M")));
+					} else {
+						eof = true;
+						break;
+					}
+				}
+				_ => {
+					let val = rdr.read_f32::<LittleEndian>().unwrap();
+					row.add_cell(cell!(val.to_string()));
+				}
+			};
+		}
+		if eof {
+			break;
+		}
+		table.add_row(row);
+		cur_row += 1;
+		if limit > -1 && cur_row > limit {
+			break;
+		}
+	}
+	table.printstd();
+}
+
+#[tokio::main]
+async fn create<R: io::Read>(ipnskey: &str, schema_rdr: R) {
+	let schema: JsonMap = serde_json::from_reader(schema_rdr).unwrap();
+
+	let client = IpfsClient::default();
+	let cursor = io::Cursor::new(serde_json::json!(schema).to_string());
+	let response = client.dag_put(cursor).await.expect("dag_put error");
+	let schema_cid = response.cid.cid_string;
+
+	info!("schema -> {}", schema_cid);
+
+	let mut root = RootNode {
+		schema: schema_cid,
+		column_heads: BTreeMap::default(),
+	};
+	let fields = schema.get("fields").unwrap().as_object().unwrap();
+	for (key, value) in fields.iter() {
+		debug!("{:?} {:?}", key, value);
+		root.column_heads.insert(key.to_string(), "".to_string());
+	}
+	let root_json = serde_json::to_string(&root).unwrap();
+	let response = client
+		.dag_put(io::Cursor::new(root_json))
+		.await
+		.expect("dag_put error");
+	let root_cid = response.cid.cid_string;
+	info!("root {:?} -> {}", root, root_cid);
+	publish_root(&client, ipnskey, &root_cid).await;
 }
 
 #[tokio::main]
 async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
 	let begintime = SystemTime::now();
-	let unixtime = serde_json::json!(
-		match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
-			Ok(n) => n.as_secs(),
-			Err(_) => 0, // before 1970?!?
-		}
-	);
+	let unixtime = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+		Ok(n) => n.as_secs(),
+		Err(_) => 0, // before 1970?!?
+	};
 
 	let json_data: JsonMap = serde_json::from_reader(rdr).unwrap();
-	debug!("given {:?}", json_data);
+	trace!("given {:#?}", json_data);
 
 	let client = IpfsClient::default();
 
@@ -175,17 +243,54 @@ async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
 				.await
 			{
 				Ok(bytes) => {
-					let mut existing: JsonMap = serde_json::from_slice(&bytes).unwrap();
-					for (key, value) in existing.iter_mut() {
-						let new_value: &serde_json::Value = match key.as_str() {
-							TIMESTAMP_KEY => &unixtime,
-							_ => json_data.get(key).unwrap(),
+					let mut root: RootNode = serde_json::from_slice(&bytes).unwrap();
+					trace!("{:#?}", root);
+					let old_column_heads = root.column_heads.clone();
+					for (field_name, col_head_cid) in &old_column_heads {
+						let mut existing = CborMap::default(); // { data: b'', next: "cid" }
+						let mut data_bytes = vec![];
+						if col_head_cid.is_empty() {
+							existing.insert(
+								"next".to_string(),
+								serde_cbor::Value::Text("".to_string()),
+							);
+						} else {
+							let bytes = client
+								.block_get(&col_head_cid)
+								.map_ok(|chunk| chunk.to_vec())
+								.try_concat()
+								.await
+								.unwrap();
+							existing = serde_cbor::from_slice(&bytes).unwrap();
+							if let serde_cbor::Value::Bytes(b) = existing.get("data").unwrap() {
+								data_bytes = b.to_vec();
+							}
+						}
+						debug!(
+							"{}: '{}' had {} bytes",
+							field_name,
+							col_head_cid,
+							data_bytes.len()
+						);
+						match field_name.as_str() {
+							TIMESTAMP_KEY => {
+								data_bytes.write_u64::<LittleEndian>(unixtime).unwrap()
+							}
+							_ => {
+								// TODO match on the schema's data type rather than always using f32
+								let datum: f32 =
+									json_data.get(field_name).unwrap().as_f64().unwrap() as f32;
+								data_bytes.write_f32::<LittleEndian>(datum).unwrap();
+							}
 						};
-						trace!("{:?} {:?} <- {:?}", key, value, new_value);
-						let vec = value.as_array_mut().unwrap();
-						vec.push(new_value.clone());
+						existing.insert("data".to_string(), serde_cbor::Value::Bytes(data_bytes));
+						let cursor = io::Cursor::new(serde_cbor::to_vec(&existing).unwrap());
+						let response = client.block_put(cursor).await.expect("block_put error");
+						let cid = response.key;
+						trace!("{} {} {:?}", field_name, cid, existing);
+						root.column_heads.insert(field_name.to_string(), cid);
 					}
-					let cursor = io::Cursor::new(serde_json::json!(existing).to_string());
+					let cursor = io::Cursor::new(serde_json::json!(root).to_string());
 					let response = client.dag_put(cursor).await.expect("dag_put error");
 					let cid = response.cid.cid_string;
 					debug!(
@@ -195,27 +300,24 @@ async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
 						cid,
 						begintime.elapsed().unwrap().as_millis()
 					);
-					client.pin_add(&cid, false).await.expect("pin error");
-					debug!("pinned @ {} ms", begintime.elapsed().unwrap().as_millis());
 					let fut = client.name_publish(&cid, false, Some("12h"), None, Some(ipnskey));
 					match timeout(Duration::from_secs(PUBLISH_TIMEOUT), fut).await {
 						Ok(_res) => {
-							// [2020-12-27T23:21:33Z INFO  ipfs_tsdb_rust] published bafyreic6cqei2aoxmfv47lioibm3dpqiqwv7ahuvxxa5ww4r2oul6ron4y @ 240776 ms
-							// should have timed out
 							info!(
 								"published {} @ {} ms",
 								&cid,
 								begintime.elapsed().unwrap().as_millis()
 							);
-							let _ = client.pin_rm(&resolved_path, false).await;
-							debug!(
-								"unpinned old @ {} ms",
-								begintime.elapsed().unwrap().as_millis()
-							);
+							// TODO deal with adding and removing pins too? (that's a lot of them though)
 							client
 								.block_rm(&resolved_path)
 								.await
-								.expect("error removing last");
+								.expect("error removing last root");
+							for (field_name, col_head_cid) in &old_column_heads {
+								client.block_rm(&col_head_cid).await.expect(
+									&("error removing data block for ".to_owned() + &field_name),
+								);
+							}
 							debug!(
 								"block_rm(old) done @ {} ms",
 								begintime.elapsed().unwrap().as_millis()
@@ -278,6 +380,9 @@ fn main() {
 				.help("Sets the output file (default is stdout)"),
 		)
 		.subcommand(
+			SubCommand::with_name("create").about("Create a new database from a JSON schema"),
+		)
+		.subcommand(
 			SubCommand::with_name("insert").about("Insert one record from a piped-in JSON object"),
 		)
 		.subcommand(
@@ -320,7 +425,9 @@ fn main() {
 		select_json(key, limit, query);
 	} else if let Some(_matches) = matches.subcommand_matches("insert") {
 		insert_from_json(key, io::stdin());
+	} else if let Some(_matches) = matches.subcommand_matches("create") {
+		create(key, io::stdin());
 	} else {
-		eprintln!("only insert and select are supported so far");
+		eprintln!("only create, insert and select are supported so far");
 	}
 }
