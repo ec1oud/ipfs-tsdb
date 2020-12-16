@@ -15,9 +15,12 @@
 **
 ****************************************************************************/
 
-use clap::{App, Arg};
+#[macro_use]
+extern crate prettytable;
+use clap::{App, Arg, SubCommand};
 use futures::TryStreamExt;
 use ipfs_api::IpfsClient;
+use prettytable::{format, Row, Table};
 use serde_json;
 use std::collections::HashMap;
 use std::io;
@@ -29,6 +32,118 @@ type JsonMap = HashMap<String, serde_json::Value>;
 
 static mut VERBOSITY: u64 = 0;
 static PUBLISH_TIMEOUT: u64 = 50;
+
+#[tokio::main]
+async fn select_json(ipnskey: &str, limit: i32, query: Vec<&str>) {
+	let begintime = SystemTime::now();
+	let verbosity = unsafe { VERBOSITY };
+	if verbosity > 0 {
+		eprintln!(
+			"select from {} limit {:?} fields {:?}",
+			ipnskey, limit, query
+		);
+	}
+
+	let client = IpfsClient::default();
+
+	match client.key_list().await {
+		Ok(list) => {
+			let ipns_name = &list
+				.keys
+				.iter()
+				.find(|&keypair| keypair.name == ipnskey)
+				.unwrap()
+				.id[..];
+			match client.name_resolve(Some(ipns_name), true, false).await {
+				Ok(resolved) => {
+					if verbosity > 0 {
+						eprintln!(
+							"resolved {} after {} ms",
+							ipns_name,
+							begintime.elapsed().unwrap().as_millis()
+						);
+					}
+					match client
+						.dag_get(&resolved.path)
+						.map_ok(|chunk| chunk.to_vec())
+						.try_concat()
+						.await
+					{
+						Ok(bytes) => {
+							if verbosity > 0 {
+								eprintln!(
+									"dag_get {} done @ {} ms",
+									&resolved.path,
+									begintime.elapsed().unwrap().as_millis()
+								);
+							}
+							// TODO if "select *" (empty query?) replace it with
+							// for (key, value) in all_records.iter_mut() { ...
+							let all_records: JsonMap = serde_json::from_slice(&bytes).unwrap();
+							let mut row_count: usize = 0; // = all_records.values() .len();
+							let mut record_values = Vec::new(); //: Vec<serde_json::Value>;
+							let mut title_row = Row::empty();
+							for field_key in query {
+								title_row.add_cell(cell!(field_key));
+								let values = all_records
+									.get(field_key)
+									.unwrap()
+									.as_array()
+									.unwrap()
+									.to_vec();
+								if row_count == 0 {
+									row_count = values.len();
+								}
+								assert_eq!(row_count, values.len()); // values were missing during some inserts?
+								if limit > -1 {
+									record_values.push(
+										values[(row_count - (limit as usize))..row_count].to_vec(),
+									);
+								} else {
+									record_values.push(values);
+								}
+								//~ println!("{}: {:?} records", field_key, row_count);
+								//~ println!("{}: {:?}", field_key, record_values[record_values.len()]);
+							}
+							let mut table = Table::new();
+							let format = format::FormatBuilder::new()
+								.column_separator('|')
+								.borders('|')
+								.separators(
+									&[format::LinePosition::Title],
+									format::LineSeparator::new('-', '|', '|', '|'),
+								)
+								.padding(1, 1)
+								.build();
+							table.set_format(format);
+							table.set_titles(title_row);
+							if limit > -1 {
+								row_count = limit as usize;
+							}
+							for r in 0..row_count {
+								let mut row = Row::empty();
+								for c in 0..record_values.len() {
+									row.add_cell(cell!(record_values[c][r].to_string()));
+								}
+								table.add_row(row);
+							}
+							table.printstd();
+						}
+						Err(e) => {
+							eprintln!("error reading dag node: {}", e);
+						}
+					}
+				}
+				Err(e) => {
+					eprintln!("error resolving {}: {}", ipnskey, e);
+				}
+			}
+		}
+		Err(e) => {
+			eprintln!("error getting keys: {}", e);
+		}
+	}
+}
 
 #[tokio::main]
 async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
@@ -173,6 +288,12 @@ fn main() {
 		.version("0.1")
 		.about("client for an IPFS-based time-series database")
 		.arg(
+			Arg::with_name("ipnskey")
+				.help("IPNS key created with 'ipfs key gen' command")
+				.required(true)
+				.index(1),
+		)
+		.arg(
 			Arg::with_name("format")
 				.short("f")
 				.long("format")
@@ -181,35 +302,54 @@ fn main() {
 				.takes_value(true),
 		)
 		.arg(
-			Arg::with_name("file")
-				.help("Sets the file to use (default is stdin/stdout)")
-				.index(3),
-		)
-		.arg(
-			Arg::with_name("ipnskey")
-				.help("IPNS key created with 'ipfs key gen' command")
-				.required(true)
-				.index(1),
-		)
-		.arg(
-			Arg::with_name("query")
-				.help("insert or select")
-				.required(true)
-				.index(2),
-		)
-		.arg(
 			Arg::with_name("v")
 				.short("v")
 				.multiple(true)
 				.help("Sets the level of verbosity"),
 		)
+		.arg(
+			Arg::with_name("input")
+				.short("i")
+				.long("input")
+				.value_name("file")
+				.help("Sets the input file (default is stdin)"),
+		)
+		.arg(
+			Arg::with_name("output")
+				.short("o")
+				.long("output")
+				.value_name("file")
+				.help("Sets the output file (default is stdout)"),
+		)
+		.subcommand(
+			SubCommand::with_name("insert").about("Insert one record from a piped-in JSON object"),
+		)
+		.subcommand(
+			SubCommand::with_name("select")
+				.about("Select records with a query")
+				.arg(
+					Arg::with_name("limit")
+						.long("limit")
+						.value_name("count")
+						.help("Limits the number of records returned"),
+				)
+				.arg(
+					Arg::with_name("query")
+						.help("list of fields")
+						//~ .required(true)
+						//~ .min_values(1)
+						.multiple(true),
+				),
+		)
 		.get_matches();
 
-	//~ let fmt = matches.value_of("format").unwrap_or("json");
-	//~ println!("Value for fmt: {}", fmt);
+	let _fmt = matches.value_of("format").unwrap_or("json");
 
-	if let Some(matches) = matches.value_of("file") {
-		println!("Using file: {}", matches);
+	if let Some(matches) = matches.value_of("input") {
+		println!("input file: {} (not supported yet)", matches);
+	}
+	if let Some(matches) = matches.value_of("output") {
+		println!("output file: {} (not supported yet)", matches);
 	}
 
 	unsafe {
@@ -218,9 +358,17 @@ fn main() {
 
 	let key = matches.value_of("ipnskey").unwrap();
 
-	let _result = match matches.value_of("query").unwrap() {
-		"insert" => insert_from_json(key, io::stdin()),
-		_ => "only insert is supported so far".to_string(),
-	};
-	//~ println!("{}", result);
+	if let Some(matches) = matches.subcommand_matches("select") {
+		let limit = matches
+			.value_of("limit")
+			.unwrap_or("-1")
+			.parse::<i32>()
+			.unwrap();
+		let query: Vec<&str> = matches.values_of("query").unwrap().collect();
+		select_json(key, limit, query);
+	} else if let Some(_matches) = matches.subcommand_matches("insert") {
+		insert_from_json(key, io::stdin());
+	} else {
+		eprintln!("only insert and select are supported so far");
+	}
 }
