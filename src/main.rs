@@ -245,7 +245,7 @@ async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
 								client.name_publish(&cid, false, Some("12h"), None, Some(ipnskey));
 							match timeout(Duration::from_secs(PUBLISH_TIMEOUT), fut).await {
 								Ok(_res) => {
-									if verbosity > 1 {
+									if verbosity > 0 {
 										println!(
 											"published {} @ {} ms",
 											&cid,
