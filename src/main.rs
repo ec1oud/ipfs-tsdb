@@ -17,6 +17,7 @@
 
 #[macro_use]
 extern crate prettytable;
+use chrono::prelude::*;
 use clap::{App, Arg, SubCommand};
 use futures::TryStreamExt;
 use ipfs_api::IpfsClient;
@@ -31,7 +32,8 @@ use tokio::time::timeout;
 type JsonMap = HashMap<String, serde_json::Value>;
 
 static mut VERBOSITY: u64 = 0;
-static PUBLISH_TIMEOUT: u64 = 50;
+const PUBLISH_TIMEOUT: u64 = 50;
+const TIMESTAMP_KEY: &str = "_timestamp";
 
 #[tokio::main]
 async fn select_json(ipnskey: &str, limit: i32, query: Vec<&str>) {
@@ -83,10 +85,14 @@ async fn select_json(ipnskey: &str, limit: i32, query: Vec<&str>) {
 							let mut row_count: usize = 0; // = all_records.values() .len();
 							let mut record_values = Vec::new(); //: Vec<serde_json::Value>;
 							let mut title_row = Row::empty();
-							for field_key in query {
-								title_row.add_cell(cell!(field_key));
+							for field_key in &query {
+								if field_key == &TIMESTAMP_KEY {
+									title_row.add_cell(cell!("timestamp (UTC)"));
+								} else {
+									title_row.add_cell(cell!(field_key));
+								}
 								let values = all_records
-									.get(field_key)
+									.get(*field_key)
 									.unwrap()
 									.as_array()
 									.unwrap()
@@ -123,7 +129,16 @@ async fn select_json(ipnskey: &str, limit: i32, query: Vec<&str>) {
 							for r in 0..row_count {
 								let mut row = Row::empty();
 								for c in 0..record_values.len() {
-									row.add_cell(cell!(record_values[c][r].to_string()));
+									if query[c] == TIMESTAMP_KEY {
+										let ts = record_values[c][r].as_i64().unwrap();
+										let dt: chrono::DateTime<Utc> = DateTime::from_utc(
+											NaiveDateTime::from_timestamp(ts, 0),
+											Utc,
+										);
+										row.add_cell(cell!(dt.format("%Y-%m-%d %H:%M")));
+									} else {
+										row.add_cell(cell!(record_values[c][r].to_string()));
+									}
 								}
 								table.add_row(row);
 							}
@@ -197,7 +212,7 @@ async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
 							let mut existing: JsonMap = serde_json::from_slice(&bytes).unwrap();
 							for (key, value) in existing.iter_mut() {
 								let new_value: &serde_json::Value = match key.as_str() {
-									"_timestamp" => &unixtime,
+									TIMESTAMP_KEY => &unixtime,
 									_ => json_data.get(key).unwrap(),
 								};
 								if verbosity > 2 {
