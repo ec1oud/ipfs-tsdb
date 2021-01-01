@@ -1,0 +1,50 @@
+{
+   "encoding-version" : 1,
+   "fields" : {
+      "_timestamp" : {
+         "encoding" : "cbor-bytes",
+         "type" : "u64"
+      },
+      "co2" : {
+         "encoding" : "cbor-bytes",
+         "type" : "u16"
+      },
+      "cpm" : {
+         "encoding" : "cbor-bytes",
+         "type" : "u16"
+      },
+      "humidity" : {
+         "encoding" : "cbor-bytes",
+         "type" : "f32"
+      },
+      "noise" : {
+         "encoding" : "cbor-bytes",
+         "type" : "f32"
+      },
+      "pm25" : {
+         "encoding" : "cbor-bytes",
+         "type" : "u16"
+      },
+      "pressure" : {
+         "encoding" : "cbor-bytes",
+         "type" : "u32"
+      },
+      "temperature" : {
+         "encoding" : "cbor-bytes",
+         "type" : "f32"
+      },
+      "uptime" : {
+         "encoding" : "cbor-bytes",
+         "type" : "u32"
+      },
+      "voc" : {
+         "encoding" : "cbor-bytes",
+         "type" : "u32"
+      },
+      "voltage" : {
+         "encoding" : "cbor-bytes",
+         "type" : "u16"
+      }
+   },
+   "node-interval" : "week"
+}
