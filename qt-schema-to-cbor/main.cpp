@@ -62,6 +62,26 @@ int main(int argc, char *argv[])
         qFatal("couldn't open input file");
     }
 
+//    float array[] = { 3.14, 3.142, 3.1416 };
+//    QByteArray bytes((char*)array, sizeof(array));
+//    QCborValue cborBytes(bytes);
+    // https://www.endpoint.com/blog/2019/03/18/extensible-binary-encoding-with-cbor :
+    // “IEEE 754 binary32, little endian, Typed Array” is tag 85
+    // But IPFS can't deal with it anyway:
+    // dag/put: missing an unmarshaller for tag 85
+//    QCborValue cborBytes(QCborTag(85), bytes);
+
+//    {
+//        QFile f("taggedByteArray.cbor");
+//        if (!f.open(QIODevice::WriteOnly)) {
+//            qWarning("Couldn't write file.");
+//            return -1;
+//        }
+
+//        f.write(cborBytes.toCbor());
+//        f.close();
+//    }
+
     QJsonDocument jd = QJsonDocument::fromJson(j.readAll());
     QCborMap headRecord;
 
@@ -75,8 +95,9 @@ int main(int argc, char *argv[])
         Q_ASSERT(kv.contains(TypeKey));
         QCborMap field;
         field.insert(TypeKey, kv.value(TypeKey).toString());
-        field.insert(ValuesKey, QByteArray());
-//        field.insert(ValuesKey, QByteArray::fromHex("9f018202039f0405ffff"));
+//        field.insert(ValuesKey, cborBytes);
+        field.insert(ValuesKey, QByteArray(4, 0));
+//        field.insert(ValuesKey, QByteArray::fromHex("9f018202039f0405ffff")); // array of indefinite length
         headRecord.insert(it.key(), field);
         ++it;
     }

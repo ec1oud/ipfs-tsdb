@@ -15,12 +15,15 @@
 **
 ****************************************************************************/
 
-use bytes::BufMut;
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use clap::{App, Arg};
 use futures::TryStreamExt;
 use ipfs_api::IpfsClient;
+use serde_cbor;
 use serde_json;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::fs::File;
 use std::io;
 use std::time::SystemTime;
 use tokio;
@@ -46,6 +49,11 @@ async fn create<R: io::Read>(ipnskey: &str, schema_rdr: R) -> String {
 	}
 
 	return "".to_string();
+}
+
+// from https://stackoverflow.com/questions/28127165/how-to-convert-struct-to-u8
+unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
+	::std::slice::from_raw_parts((p as *const T) as *const u8, ::std::mem::size_of::<T>())
 }
 
 #[tokio::main]
@@ -82,7 +90,7 @@ async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
 						);
 					}
 					match client
-						.dag_get(&resolved.path)
+						.block_get(&resolved.path)
 						.map_ok(|chunk| chunk.to_vec())
 						.try_concat()
 						.await
@@ -90,37 +98,43 @@ async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
 						Ok(bytes) => {
 							if verbosity > 1 {
 								println!(
-									"dag_get {} done @ {} ms",
+									"block_get {} done @ {} ms",
 									&resolved.path,
 									begintime.elapsed().unwrap().as_millis()
 								);
 							}
-							let mut existing: JsonMap = serde_json::from_slice(&bytes).unwrap();
+							let mut existing: BTreeMap<
+								String,
+								BTreeMap<String, serde_cbor::Value>,
+							> = serde_cbor::from_slice(&bytes).unwrap();
+							println!("existing {:?}", existing);
 							for (key, value) in existing.iter_mut() {
-								let values_entry = value.get("values").unwrap();
-								let mut buf = vec![];
-								buf.put(values_entry.as_str().unwrap());
-								match key.as_str() {
-									"_timestamp" => buf.put_u64_le(unixtime),
-									_ => {
-										//~ let v: f32 = json_data.get(key).unwrap().as_f64().unwrap() as f32;
-										let v = json_data.get(key).unwrap().as_f64().unwrap();
-										buf.put_f64_le(v);
-									}
-								};
-								let s = unsafe { String::from_utf8_unchecked(buf) };
-								value
-									.as_object_mut()
-									.unwrap()
-									.insert("values".to_string(), serde_json::json!(s));
-							}
+								//~ let values_entry: &serde_cbor::Value = ;
+								if let serde_cbor::Value::Bytes(b) = value.get("values").unwrap() {
+									let mut bm = b.to_owned();
+									// append the new value (made up here)
+									bm.write_f32::<LittleEndian>(3.14).unwrap();
+									println!("{} {:?}", key, bm);
+									//~ let mut rdr = io::Cursor::new(bm);
+									//~ println!("first is {:?}", rdr.read_f32::<LittleEndian>().unwrap());
+									//~ println!("next is {:?}", rdr.read_f32::<LittleEndian>().unwrap());
 
-							let cursor = io::Cursor::new(serde_json::json!(existing).to_string());
-							let response = client.dag_put(cursor).await.expect("dag_put error");
-							let cid = response.cid.cid_string;
+									value
+										.insert("values".to_string(), serde_cbor::Value::Bytes(bm));
+									println!("{} {:?}", key, value);
+								}
+							}
+							println!("updated {:?}", existing);
+							let f = File::create("updated.cbor").unwrap();
+							serde_cbor::to_writer(f, &existing)
+								.expect("error generating cbor from updated record");
+
+							let cursor = io::Cursor::new(serde_cbor::to_vec(&existing).unwrap());
+							let response = client.block_put(cursor).await.expect("dag_put error");
+							let cid = response.key;
 							if verbosity > 1 {
 								println!(
-									"ipns {} {} {} -> {} @ {} ms",
+									"ipns {} {} {} -> {:?} @ {} ms",
 									ipnskey,
 									ipns_name,
 									&resolved.path,
@@ -128,7 +142,7 @@ async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
 									begintime.elapsed().unwrap().as_millis()
 								);
 							}
-							return "".to_string();
+
 							//~ client.pin_add(&cid, false).await.expect("pin error");
 							//~ if verbosity > 1 {
 							//~ println!(
@@ -153,18 +167,18 @@ async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
 							//~ begintime.elapsed().unwrap().as_millis()
 							//~ );
 							//~ }
-							//~ client
-							//~ .name_publish(&cid, false, Some("12h"), None, Some(ipnskey))
-							//~ .await
-							//~ .expect("error publishing name");
-							//~ if verbosity > 1 {
-							//~ println!(
-							//~ "published {} @ {} ms",
-							//~ &cid,
-							//~ begintime.elapsed().unwrap().as_millis()
-							//~ );
-							//~ }
-							//~ return cid;
+							client
+								.name_publish(&cid, false, Some("12h"), None, Some(ipnskey))
+								.await
+								.expect("error publishing name");
+							if verbosity > 1 {
+								println!(
+									"published {} @ {} ms",
+									&cid,
+									begintime.elapsed().unwrap().as_millis()
+								);
+							}
+							return cid;
 						}
 						Err(e) => {
 							eprintln!("error reading dag node: {}", e);
