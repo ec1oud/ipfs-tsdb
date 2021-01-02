@@ -111,6 +111,8 @@ async fn select_json(ipnskey: &str, limit: i32, query: Vec<&str>) {
 		.unwrap();
 	let root: RootNode = serde_json::from_slice(&root_bytes).unwrap();
 	trace!("{:#?}", root);
+	let schema: JsonMap = get_node_json(&client, &root.schema).await.unwrap();
+	let schema_fields = &schema["fields"];
 	let mut field_readers = vec![];
 	let mut title_row = Row::empty();
 	for field_name in &query {
@@ -158,20 +160,62 @@ async fn select_json(ipnskey: &str, limit: i32, query: Vec<&str>) {
 		let mut row = Row::empty();
 		let mut eof = false;
 		for c in 0..field_readers.len() {
+			let field_type = schema_fields[query[c]]["type"].as_str().unwrap();
 			let rdr = &mut field_readers[c];
-			match query[c] {
-				TIMESTAMP_KEY => {
-					// actually it was written as u64, but we won't need that MSB for millennia
-					let ts = rdr.read_i64::<LittleEndian>();
-					// TODO do error checking more elegantly
-					if ts.is_ok() {
-						let dt: chrono::DateTime<Utc> =
-							DateTime::from_utc(NaiveDateTime::from_timestamp(ts.unwrap(), 0), Utc);
-						row.add_cell(cell!(dt.format("%Y-%m-%d %H:%M")));
-					} else {
-						eof = true;
-						break;
+			match field_type {
+				"u64" => {
+					match query[c] {
+						TIMESTAMP_KEY => {
+							let ts = rdr.read_u64::<LittleEndian>();
+							// TODO do error checking more elegantly
+							if ts.is_ok() {
+								let dt: chrono::DateTime<Utc> = DateTime::from_utc(
+									NaiveDateTime::from_timestamp(ts.unwrap() as i64, 0),
+									Utc,
+								);
+								row.add_cell(cell!(dt.format("%Y-%m-%d %H:%M")));
+							} else {
+								eof = true;
+								break;
+							}
+						}
+						_ => {
+							let val = rdr.read_u64::<LittleEndian>().unwrap();
+							row.add_cell(cell!(val.to_string()));
+						}
 					}
+				}
+				"u32" => {
+					let val = rdr.read_u32::<LittleEndian>().unwrap();
+					row.add_cell(cell!(val.to_string()));
+				}
+				"u16" => {
+					let val = rdr.read_u16::<LittleEndian>().unwrap();
+					row.add_cell(cell!(val.to_string()));
+				}
+				"u8" => {
+					let val = rdr.read_u8().unwrap();
+					row.add_cell(cell!(val.to_string()));
+				}
+				"i64" => {
+					let val = rdr.read_i64::<LittleEndian>().unwrap();
+					row.add_cell(cell!(val.to_string()));
+				}
+				"i32" => {
+					let val = rdr.read_i32::<LittleEndian>().unwrap();
+					row.add_cell(cell!(val.to_string()));
+				}
+				"i16" => {
+					let val = rdr.read_i16::<LittleEndian>().unwrap();
+					row.add_cell(cell!(val.to_string()));
+				}
+				"i8" => {
+					let val = rdr.read_i8().unwrap();
+					row.add_cell(cell!(val.to_string()));
+				}
+				"f64" => {
+					let val = rdr.read_f64::<LittleEndian>().unwrap();
+					row.add_cell(cell!(val.to_string()));
 				}
 				_ => {
 					let val = rdr.read_f32::<LittleEndian>().unwrap();
@@ -229,8 +273,11 @@ async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
 		Err(_) => 0, // before 1970?!?
 	};
 
-	let json_data: JsonMap = serde_json::from_reader(rdr).unwrap();
+	let mut json_data: JsonMap = serde_json::from_reader(rdr).unwrap();
 	trace!("given {:#?}", json_data);
+	if !json_data.contains_key(TIMESTAMP_KEY) {
+		json_data.insert(TIMESTAMP_KEY.to_string(), serde_json::json!(unixtime));
+	}
 
 	let client = IpfsClient::default();
 
@@ -245,8 +292,12 @@ async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
 				Ok(bytes) => {
 					let mut root: RootNode = serde_json::from_slice(&bytes).unwrap();
 					trace!("{:#?}", root);
+					let schema: JsonMap = get_node_json(&client, &root.schema).await.unwrap();
+					let schema_fields = &schema["fields"];
 					let old_column_heads = root.column_heads.clone();
 					for (field_name, col_head_cid) in &old_column_heads {
+						let field_type = schema_fields[field_name]["type"].as_str().unwrap();
+						// TODO respect the encoding too
 						let mut existing = CborMap::default(); // { data: b'', next: "cid" }
 						let mut data_bytes = vec![];
 						if col_head_cid.is_empty() {
@@ -267,18 +318,57 @@ async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
 							}
 						}
 						debug!(
-							"{}: '{}' had {} bytes",
+							"{}: '{}' had {} bytes, type {}",
 							field_name,
 							col_head_cid,
-							data_bytes.len()
+							data_bytes.len(),
+							field_type
 						);
-						match field_name.as_str() {
-							TIMESTAMP_KEY => {
-								data_bytes.write_u64::<LittleEndian>(unixtime).unwrap()
+						match field_type {
+							"u64" => {
+								let datum = json_data.get(field_name).unwrap().as_u64().unwrap();
+								data_bytes.write_u64::<LittleEndian>(datum).unwrap();
+							}
+							"u32" => {
+								let datum =
+									json_data.get(field_name).unwrap().as_u64().unwrap() as u32;
+								data_bytes.write_u32::<LittleEndian>(datum).unwrap();
+							}
+							"u16" => {
+								let datum =
+									json_data.get(field_name).unwrap().as_u64().unwrap() as u16;
+								data_bytes.write_u16::<LittleEndian>(datum).unwrap();
+							}
+							"u8" => {
+								let datum =
+									json_data.get(field_name).unwrap().as_u64().unwrap() as u8;
+								data_bytes.write_u8(datum).unwrap();
+							}
+							"i64" => {
+								let datum = json_data.get(field_name).unwrap().as_i64().unwrap();
+								data_bytes.write_i64::<LittleEndian>(datum).unwrap();
+							}
+							"i32" => {
+								let datum =
+									json_data.get(field_name).unwrap().as_i64().unwrap() as i32;
+								data_bytes.write_i32::<LittleEndian>(datum).unwrap();
+							}
+							"i16" => {
+								let datum =
+									json_data.get(field_name).unwrap().as_i64().unwrap() as i16;
+								data_bytes.write_i16::<LittleEndian>(datum).unwrap();
+							}
+							"i8" => {
+								let datum =
+									json_data.get(field_name).unwrap().as_i64().unwrap() as i8;
+								data_bytes.write_i8(datum).unwrap();
+							}
+							"f64" => {
+								let datum = json_data.get(field_name).unwrap().as_f64().unwrap();
+								data_bytes.write_f64::<LittleEndian>(datum).unwrap();
 							}
 							_ => {
-								// TODO match on the schema's data type rather than always using f32
-								let datum: f32 =
+								let datum =
 									json_data.get(field_name).unwrap().as_f64().unwrap() as f32;
 								data_bytes.write_f32::<LittleEndian>(datum).unwrap();
 							}
