@@ -156,6 +156,7 @@ async fn select_json(ipnskey: &str, limit: i32, query: Vec<&str>) {
 	let mut cur_row: i32 = 0;
 
 	// emit rows until the data runs out or we hit the limit
+	// TODO the data could run out in any column, not necessarily timestamp first
 	loop {
 		let mut row = Row::empty();
 		let mut eof = false;
@@ -324,56 +325,58 @@ async fn insert_from_json<R: io::Read>(ipnskey: &str, rdr: R) -> String {
 							data_bytes.len(),
 							field_type
 						);
+						let mut new_bytes = vec![];
 						match field_type {
 							"u64" => {
 								let datum = json_data.get(field_name).unwrap().as_u64().unwrap();
-								data_bytes.write_u64::<LittleEndian>(datum).unwrap();
+								new_bytes.write_u64::<LittleEndian>(datum).unwrap();
 							}
 							"u32" => {
 								let datum =
 									json_data.get(field_name).unwrap().as_u64().unwrap() as u32;
-								data_bytes.write_u32::<LittleEndian>(datum).unwrap();
+								new_bytes.write_u32::<LittleEndian>(datum).unwrap();
 							}
 							"u16" => {
 								let datum =
 									json_data.get(field_name).unwrap().as_u64().unwrap() as u16;
-								data_bytes.write_u16::<LittleEndian>(datum).unwrap();
+								new_bytes.write_u16::<LittleEndian>(datum).unwrap();
 							}
 							"u8" => {
 								let datum =
 									json_data.get(field_name).unwrap().as_u64().unwrap() as u8;
-								data_bytes.write_u8(datum).unwrap();
+								new_bytes.write_u8(datum).unwrap();
 							}
 							"i64" => {
 								let datum = json_data.get(field_name).unwrap().as_i64().unwrap();
-								data_bytes.write_i64::<LittleEndian>(datum).unwrap();
+								new_bytes.write_i64::<LittleEndian>(datum).unwrap();
 							}
 							"i32" => {
 								let datum =
 									json_data.get(field_name).unwrap().as_i64().unwrap() as i32;
-								data_bytes.write_i32::<LittleEndian>(datum).unwrap();
+								new_bytes.write_i32::<LittleEndian>(datum).unwrap();
 							}
 							"i16" => {
 								let datum =
 									json_data.get(field_name).unwrap().as_i64().unwrap() as i16;
-								data_bytes.write_i16::<LittleEndian>(datum).unwrap();
+								new_bytes.write_i16::<LittleEndian>(datum).unwrap();
 							}
 							"i8" => {
 								let datum =
 									json_data.get(field_name).unwrap().as_i64().unwrap() as i8;
-								data_bytes.write_i8(datum).unwrap();
+								new_bytes.write_i8(datum).unwrap();
 							}
 							"f64" => {
 								let datum = json_data.get(field_name).unwrap().as_f64().unwrap();
-								data_bytes.write_f64::<LittleEndian>(datum).unwrap();
+								new_bytes.write_f64::<LittleEndian>(datum).unwrap();
 							}
 							_ => {
 								let datum =
 									json_data.get(field_name).unwrap().as_f64().unwrap() as f32;
-								data_bytes.write_f32::<LittleEndian>(datum).unwrap();
+								new_bytes.write_f32::<LittleEndian>(datum).unwrap();
 							}
 						};
-						existing.insert("data".to_string(), serde_cbor::Value::Bytes(data_bytes));
+						new_bytes.append(&mut data_bytes);
+						existing.insert("data".to_string(), serde_cbor::Value::Bytes(new_bytes));
 						let cursor = io::Cursor::new(serde_cbor::to_vec(&existing).unwrap());
 						let response = client.block_put(cursor).await.expect("block_put error");
 						let cid = response.key;
